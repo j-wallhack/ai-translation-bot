@@ -1279,6 +1279,49 @@ async def on_message(message):
             await message.reply("Sorry, I couldn't process your translation request. Format: `#TL from_lang to_lang\\nyour message here`")
             return
 
+    # Reply-only shortcut: "!TL" translates the replied message using user prefs
+    if content.upper() == '!TL':
+        if not message.reference or not message.reference.message_id:
+            await message.reply("Please reply to a message with `!TL` to translate it.")
+            return
+        try:
+            referenced_message = await message.channel.fetch_message(message.reference.message_id)
+        except Exception as e:
+            logger.error(f"Failed to fetch referenced message for !TL: {e}")
+            await message.reply("Sorry, I couldn't find the replied message to translate.")
+            return
+
+        if referenced_message.author.bot:
+            await message.reply("I can't translate bot messages.")
+            return
+
+        referenced_text = referenced_message.content.strip() if referenced_message.content else ""
+        if not referenced_text:
+            await message.reply("That message doesn't contain any text to translate.")
+            return
+
+        user_id = str(message.author.id)
+        user_prefs = user_langs.get(user_id, {})
+        from_lang = user_prefs.get("from_lang")
+        to_lang = user_prefs.get("to_lang")
+        if not (from_lang and to_lang):
+            await message.reply("You need to set a language preference first with `!setlang`.")
+            return
+
+        await translate_and_send(
+            message,
+            from_lang,
+            to_lang,
+            referenced_text,
+            display_author=referenced_message.author,
+            track_pair=False
+        )
+        try:
+            await message.delete()
+        except Exception as e:
+            logger.warning(f"Failed to delete !TL reply message: {e}")
+        return
+
     # Skip if message is a command
     if message.content.startswith('!'):
         return
@@ -1301,7 +1344,7 @@ async def on_message(message):
             await translate_and_send(message, from_lang, to_lang, message.content)
 
 # Helper function to translate text and send response
-async def translate_and_send(message, from_lang, to_lang, text):
+async def translate_and_send(message, from_lang, to_lang, text, display_author=None, track_pair=True):
     global model
     thinking_message = None
     try:
@@ -1317,6 +1360,7 @@ async def translate_and_send(message, from_lang, to_lang, text):
             logger.info(f"Truncated long message for translation by user {message.author.display_name}")
 
         # Send a "thinking" message immediately
+        author_for_display = display_author or message.author
         target_language_name = LANGUAGES.get(to_lang, to_lang.upper())
         thinking_embed = discord.Embed(
             description=f"```\n{text}\n```",
@@ -1324,7 +1368,7 @@ async def translate_and_send(message, from_lang, to_lang, text):
         )
         thinking_embed.set_author(
             name=f"⌛ Translating to {target_language_name}...",
-            icon_url=message.author.display_avatar.url if message.author.display_avatar else None
+            icon_url=author_for_display.display_avatar.url if author_for_display.display_avatar else None
         )
         try:
             is_reply = message.reference and message.reference.message_id
@@ -1338,8 +1382,9 @@ async def translate_and_send(message, from_lang, to_lang, text):
             # Fallback to sending in the same channel without replying
             thinking_message = await message.channel.send(embed=thinking_embed)
 
-        # Call Gemini API for translation
-        prompt = f"""Translate the following text from {from_lang} to {to_lang}.
+        # Call Gemini API for translation with typing indicator
+        async with message.channel.typing():
+            prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
 Requirements:
 - Output ONLY the translation text
@@ -1354,7 +1399,7 @@ Requirements:
 
 Message to translate:
 {text}"""
-        response = model.generate_content(prompt)
+            response = model.generate_content(prompt)
 
         # Get translated message
         translated_text = response.text.strip() if response.text else ""
@@ -1371,8 +1416,8 @@ Message to translate:
 
             # Set the author with user's name and avatar
             embed.set_author(
-                name=message.author.display_name,
-                icon_url=message.author.display_avatar.url
+                name=author_for_display.display_name,
+                icon_url=author_for_display.display_avatar.url
             )
 
             # Add language information to the footer
@@ -1382,13 +1427,15 @@ Message to translate:
             if thinking_message:
                 await thinking_message.edit(content=None, embed=embed)
                 # Store the message pair for tracking edits/deletes
-                message_pairs[str(message.id)] = str(thinking_message.id)
-                save_message_pairs(message_pairs)
+                if track_pair:
+                    message_pairs[str(message.id)] = str(thinking_message.id)
+                    save_message_pairs(message_pairs)
             else:
                 # This is a fallback in case the thinking message failed to send
                 sent_message = await message.channel.send(embed=embed)
-                message_pairs[str(message.id)] = str(sent_message.id)
-                save_message_pairs(message_pairs)
+                if track_pair:
+                    message_pairs[str(message.id)] = str(sent_message.id)
+                    save_message_pairs(message_pairs)
 
             logger.info(f"Translated message for user {message.author.display_name} from {from_lang} to {to_lang}")
             #also log the original message and the translated message
@@ -1598,8 +1645,9 @@ async def update_translation(message, translated_msg, from_lang, to_lang, text):
         )
         await translated_msg.edit(content=None, embed=thinking_embed)
 
-        # Call Gemini API for translation
-        prompt = f"""Translate the following text from {from_lang} to {to_lang}.
+        # Call Gemini API for translation with typing indicator
+        async with message.channel.typing():
+            prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
 Requirements:
 - Output ONLY the translation text
@@ -1614,7 +1662,7 @@ Requirements:
 
 Message to translate:
 {text}"""
-        response = model.generate_content(prompt)
+            response = model.generate_content(prompt)
 
         # Get translated message
         translated_text = response.text.strip() if response.text else ""
