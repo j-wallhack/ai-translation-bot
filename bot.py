@@ -9,17 +9,8 @@ import platform
 from discord import ui
 from discord.ext import commands
 from dotenv import load_dotenv
-import google.generativeai as genai
-try:
-    # New unified client that supports image generation/inline_data
-    from google import genai as genai_v2
-    try:
-        from google.genai import types as genai_types
-    except Exception:
-        genai_types = None
-except Exception:
-    genai_v2 = None
-    genai_types = None
+from google import genai
+from google.genai import types as genai_types
 from io import BytesIO
 
 # Configure logging (console + daily file with date in filename)
@@ -79,126 +70,97 @@ def save_bot_config(config):
 
 bot_config = load_bot_config()
 
-# Configure Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(bot_config['model_name'])
+# Configure Gemini API client
+client = genai.Client(api_key=GEMINI_API_KEY)
 logger.info(f"Initialized with model: {bot_config['model_name']}")
 
 # --- Helpers for AI content generation (text and images) ---
 async def generate_ai_content(model_id: str, prompt: str):
-    """Generate content using either the new Google GenAI client (if available)
-    or the legacy google.generativeai model. Returns (texts, images).
+    """Generate content using the Google GenAI client. Returns (texts, images).
 
     texts: list[str]
     images: list[tuple[bytes, str]]  # (data, mime_type)
     """
     try:
         logger.info(
-            f"generate_ai_content: model_id={model_id}, has_v2={(genai_v2 is not None)}, "
+            f"generate_ai_content: model_id={model_id}, "
             f"prompt_len={len(prompt) if isinstance(prompt, str) else 'n/a'}, is_image_model={'image' in (model_id or '')}"
         )
     except Exception:
         pass
-    # Prefer the new client for image support
-    if genai_v2 is not None:
-        def _call_v2():
-            client = genai_v2.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else genai_v2.Client()
-            # For image-preview models, request both text and image parts
-            if 'image' in model_id:
-                # Prefer returning images; the API returns inline_data parts
-                logger.info("genai_v2: calling image-capable model.generate_content")
-                resp = client.models.generate_content(
-                    model=model_id,
-                    contents=[prompt],
-                )
-            else:
-                logger.info("genai_v2: calling text model.generate_content")
-                resp = client.models.generate_content(model=model_id, contents=[prompt])
-            out_texts = []
-            out_images = []
 
-            def _add_image_from_inline(inline_obj):
-                try:
-                    data = inline_obj.get('data') if isinstance(inline_obj, dict) else getattr(inline_obj, 'data', None)
-                    if data is None:
-                        return
-                    if isinstance(data, str):
-                        try:
-                            data = base64.b64decode(data)
-                        except Exception:
-                            return
-                    mime = inline_obj.get('mime_type') if isinstance(inline_obj, dict) else getattr(inline_obj, 'mime_type', 'image/png')
-                    out_images.append((data, mime or 'image/png'))
-                except Exception:
-                    return
+    try:
+        resp = await client.aio.models.generate_content(
+            model=model_id,
+            contents=[prompt],
+        )
 
-            def _walk(obj):
-                if obj is None:
+        out_texts = []
+        out_images = []
+
+        def _add_image_from_inline(inline_obj):
+            try:
+                data = inline_obj.get('data') if isinstance(inline_obj, dict) else getattr(inline_obj, 'data', None)
+                if data is None:
                     return
-                if isinstance(obj, dict):
-                    # Text
-                    text_val = obj.get('text')
-                    if isinstance(text_val, str):
-                        out_texts.append(text_val)
-                    # Inline image data
-                    if 'inline_data' in obj and isinstance(obj['inline_data'], (dict,)):
-                        _add_image_from_inline(obj['inline_data'])
-                    # Recurse
-                    for v in obj.values():
-                        _walk(v)
-                elif isinstance(obj, (list, tuple)):
-                    for item in obj:
-                        _walk(item)
-                else:
-                    # Object with attributes (pydantic)
+                if isinstance(data, str):
                     try:
-                        if hasattr(obj, 'text') and isinstance(obj.text, str):
-                            out_texts.append(obj.text)
-                        inline = getattr(obj, 'inline_data', None)
-                        if inline is not None:
-                            if isinstance(inline, dict):
-                                _add_image_from_inline(inline)
-                            else:
-                                _add_image_from_inline({'data': getattr(inline, 'data', None), 'mime_type': getattr(inline, 'mime_type', 'image/png')})
+                        data = base64.b64decode(data)
                     except Exception:
-                        pass
-
-            # Try model_dump/to_dict for maximum compatibility
-            try:
-                logger.info(f"genai_v2: resp type={type(resp)} has_model_dump={hasattr(resp,'model_dump')} has_to_dict={hasattr(resp,'to_dict')}")
-                if hasattr(resp, 'model_dump'):
-                    _walk(resp.model_dump())
-                elif hasattr(resp, 'to_dict'):
-                    _walk(resp.to_dict())
-                else:
-                    _walk(resp)
+                        return
+                mime = inline_obj.get('mime_type') if isinstance(inline_obj, dict) else getattr(inline_obj, 'mime_type', 'image/png')
+                out_images.append((data, mime or 'image/png'))
             except Exception:
-                _walk(resp)
+                return
 
-            try:
-                logger.info(f"genai_v2 parsed: texts={len(out_texts)}, images={len(out_images)}")
-                for i, (data, mime) in enumerate(out_images[:3]):
-                    logger.info(f"genai_v2 image[{i}]: bytes={len(data) if isinstance(data, (bytes,bytearray)) else 'n/a'}, mime={mime}")
-            except Exception:
-                pass
-
-            return out_texts, out_images
+        def _walk(obj):
+            if obj is None:
+                return
+            if isinstance(obj, dict):
+                text_val = obj.get('text')
+                if isinstance(text_val, str):
+                    out_texts.append(text_val)
+                if 'inline_data' in obj and isinstance(obj['inline_data'], (dict,)):
+                    _add_image_from_inline(obj['inline_data'])
+                for v in obj.values():
+                    _walk(v)
+            elif isinstance(obj, (list, tuple)):
+                for item in obj:
+                    _walk(item)
+            else:
+                try:
+                    if hasattr(obj, 'text') and isinstance(obj.text, str):
+                        out_texts.append(obj.text)
+                    inline = getattr(obj, 'inline_data', None)
+                    if inline is not None:
+                        if isinstance(inline, dict):
+                            _add_image_from_inline(inline)
+                        else:
+                            _add_image_from_inline({'data': getattr(inline, 'data', None), 'mime_type': getattr(inline, 'mime_type', 'image/png')})
+                except Exception:
+                    pass
 
         try:
-            return await asyncio.to_thread(_call_v2)
-        except Exception as e:
-            logger.warning(f"genai_v2 client failed, falling back to legacy API: {e}")
+            if hasattr(resp, 'model_dump'):
+                _walk(resp.model_dump())
+            elif hasattr(resp, 'to_dict'):
+                _walk(resp.to_dict())
+            else:
+                _walk(resp)
+        except Exception:
+            _walk(resp)
 
-    # Fallback to legacy text model
-    try:
-        logger.info("legacy genai: calling GenerativeModel.generate_content_async")
-        generation_model = genai.GenerativeModel(model_id)
-        resp = await generation_model.generate_content_async(prompt)
-        text = resp.text.strip() if getattr(resp, 'text', None) else ""
-        logger.info(f"legacy genai parsed: text_len={len(text) if text else 0}")
-        return ([text] if text else []), []
+        try:
+            logger.info(f"generate_ai_content parsed: texts={len(out_texts)}, images={len(out_images)}")
+            for i, (data, mime) in enumerate(out_images[:3]):
+                logger.info(f"image[{i}]: bytes={len(data) if isinstance(data, (bytes,bytearray)) else 'n/a'}, mime={mime}")
+        except Exception:
+            pass
+
+        return out_texts, out_images
+
     except Exception as e:
-        logger.error(f"Legacy model generation failed: {e}")
+        logger.error(f"Content generation failed: {e}")
         return [], []
 
 # Setup bot with command prefix
@@ -473,14 +435,6 @@ class AIModelSelect(ui.Select):
         if selected_model_id == "no_models":
             await interaction.response.send_message("No models available.", ephemeral=True)
             return
-        # Guard: image-preview models require the new google-genai client
-        if ('image' in selected_model_id or 'image-preview' in selected_model_id) and genai_v2 is None:
-            await interaction.response.send_message(
-                "Image generation requires the `google-genai` package. Please install it and restart the bot.",
-                ephemeral=True
-            )
-            return
-        
         await interaction.response.send_modal(AIPromptModal(model_id=selected_model_id))
 
 
@@ -972,8 +926,8 @@ def get_models():
     """Fetches and filters compatible text generation models from the Gemini API."""
     models_list = []
     try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
+        for m in client.models.list():
+            if 'generateContent' in (m.supported_generation_methods or []):
                 # Apply filters from test.py to get stable, non-experimental models
                 if "gemini" not in m.name:
                     continue
@@ -1024,7 +978,7 @@ class ModelSelect(ui.Select):
         super().__init__(placeholder="Choose a translation model...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        global model, bot_config
+        global bot_config
         selected_model_id = self.values[0]
 
         if selected_model_id == "no_models":
@@ -1032,10 +986,6 @@ class ModelSelect(ui.Select):
             return
 
         try:
-            # Update global model object
-            model = genai.GenerativeModel(selected_model_id)
-
-            # Save to config file
             bot_config['model_name'] = selected_model_id
             save_bot_config(bot_config)
 
@@ -1345,7 +1295,6 @@ async def on_message(message):
 
 # Helper function to translate text and send response
 async def translate_and_send(message, from_lang, to_lang, text, display_author=None, track_pair=True):
-    global model
     thinking_message = None
     try:
         # Skip if text is empty or only whitespace
@@ -1399,7 +1348,9 @@ Requirements:
 
 Message to translate:
 {text}"""
-            response = model.generate_content(prompt)
+            response = await client.aio.models.generate_content(
+                model=bot_config['model_name'], contents=prompt
+            )
 
         # Get translated message
         translated_text = response.text.strip() if response.text else ""
@@ -1463,12 +1414,9 @@ Message to translate:
                 last_err = None
                 for next_model_id in candidates:
                     try:
-                        # Switch global model and persist
-                        model = genai.GenerativeModel(next_model_id)
                         bot_config['model_name'] = next_model_id
                         save_bot_config(bot_config)
                         await update_model_status_channel()
-                        # Retry translation using the same prompt
                         if 'prompt' not in locals():
                             prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
@@ -1485,7 +1433,9 @@ Requirements:
 
 Message to translate:
 {text}"""
-                        response = model.generate_content(prompt)
+                        response = await client.aio.models.generate_content(
+                            model=next_model_id, contents=prompt
+                        )
                         translated_text = response.text.strip() if getattr(response, 'text', None) else ""
                         if translated_text:
                             if len(translated_text) > 4096:
@@ -1662,7 +1612,9 @@ Requirements:
 
 Message to translate:
 {text}"""
-            response = model.generate_content(prompt)
+            response = await client.aio.models.generate_content(
+                model=bot_config['model_name'], contents=prompt
+            )
 
         # Get translated message
         translated_text = response.text.strip() if response.text else ""
