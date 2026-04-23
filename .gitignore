@@ -12,5 +12,7 @@
 *.wim
 *.iso
 *.log
-*.json
+settings/*.json
+!locales/*.json
 test.*
+*.bat

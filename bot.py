@@ -13,6 +13,26 @@ from google import genai
 from google.genai import types as genai_types
 from io import BytesIO
 
+# Load locales
+locales = {}
+try:
+    if os.path.exists("locales"):
+        for filename in os.listdir("locales"):
+            if filename.endswith(".json"):
+                lang_code = filename[:-5]
+                with open(os.path.join("locales", filename), "r", encoding="utf-8") as f:
+                    locales[lang_code] = json.load(f)
+except Exception as e:
+    print(f"Error loading locales: {e}")
+
+def get_locale_text(lang, key, default=""):
+    if lang in locales and key in locales[lang]:
+        return locales[lang][key]
+    if "en" in locales and key in locales["en"]:
+        return locales["en"][key]
+    return default
+
+
 # Configure logging (console + daily file with date in filename)
 logger = logging.getLogger('translation-bot')
 if not logger.handlers:
@@ -40,7 +60,7 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # New config file for bot settings
-CONFIG_FILE = 'bot_config.json'
+CONFIG_FILE = 'settings/bot_config.json'
 
 def load_bot_config():
     """Load bot configuration from JSON file."""
@@ -169,9 +189,9 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Language preferences file
-LANG_FILE = 'user_langs.json'
-CHANNEL_FILE = 'channel_settings.json'
-MESSAGE_PAIRS_FILE = 'message_pairs.json'
+LANG_FILE = 'settings/user_langs.json'
+CHANNEL_FILE = 'settings/channel_settings.json'
+MESSAGE_PAIRS_FILE = 'settings/message_pairs.json'
 
 # Load user language preferences
 def load_user_langs():
@@ -778,148 +798,17 @@ async def help_command(ctx):
     """Show help information about the bot commands"""
     await send_help_embed(ctx)
 
-# Function to send help in both English and Japanese using markdown
+# Function to send help in all available languages
 async def send_help_embed(ctx):
-    """Send help information in both English and Japanese"""
-    help_text = """# Translation Bot Help
-
-## User Commands
-
-**!mylang**
-Check your current language preferences
-
-**!translate on/off**
-Turn translation on or off for yourself
-
-**!translate help**
-Show this help message in English and Japanese
-
-**!bothelp**
-Alternative command to show this help message
-
-## Admin Commands
-
-**!config**
-Configure the translation model (Admin only)
-
-**!setstatuschannel #voice-channel**
-Set a voice channel to display the current model name (Admin only)
-
-**!setlang @user from_lang to_lang**
-Set a user's translation languages (Admin/Mod only)
-Example: `!setlang @User en ja` - Translates from English to Japanese
-Use `auto` for source language to auto-detect
-
-**!translate on/off @user**
-Turn translation on or off for a specified user
-
-**!translate on/off #channel**
-Turn translation on or off for a specified channel
-
-**!translate on/off ALL**
-Turn translation on or off for all users
-
-## Inline Translation
-
-Use `#TL` prefix for manual translation:
-```
-#TL en ja
-Your message here
-```
-
-Use `#noTL` prefix to skip translation for a specific message.
-
-## Features
-- Automatic translation based on user preferences
-- Manual translation with `#TL` prefix
-- Skip translation with `#noTL` prefix
-- Translation statistics tracking
-- Smart handling of edited and deleted messages
-- Preserves markdown, emojis, and user mentions
-- Appropriate formality levels for Asian languages (敬語, 존댓말, 敬语)
-- Ignores empty messages (image-only posts, etc.)
-- Automatic text length limits for API safety
-- Robust error handling and message validation
-
-## Language Codes
-- `en` - English
-- `ja` - Japanese
-- `ko` - Korean
-- `zh` - Chinese
-- `es` - Spanish
-- `fr` - French
-- `de` - German
-- `it` - Italian
-- `pt` - Portuguese
-- `ru` - Russian
-"""
-
-    jp_help_text = """# 翻訳ボット ヘルプ
-
-## ユーザーコマンド
-
-**!mylang**
-現在の言語設定を確認します
-
-**!translate on/off**
-自分の翻訳機能をオン/オフにします
-
-**!translate help**
-このヘルプメッセージを英語と日本語で表示します
-
-**!bothelp**
-このヘルプメッセージを表示する代替コマンド
-
-## 管理者コマンド
-
-**!config**
-翻訳モデルを設定します（管理者のみ）
-
-**!setstatuschannel #ボイスチャンネル**
-現在のモデル名を表示するボイスチャンネルを設定します（管理者のみ）
-
-**!setlang @ユーザー from_lang to_lang**
-ユーザーの翻訳言語を設定します（管理者/モデレーターのみ）
-例: `!setlang @ユーザー en ja` - 英語から日本語に翻訳
-ソース言語を自動検出するには `auto` を使用してください
-
-**!translate on/off @ユーザー**
-指定したユーザーの翻訳機能をオン/オフにします
-
-**!translate on/off #チャンネル**
-指定したチャンネルの翻訳機能をオン/オフにします
-
-**!translate on/off ALL**
-すべてのユーザーの翻訳機能をオン/オフにします
-
-## インライン翻訳
-
-`#TL` プレフィックスで手動翻訳:
-```
-#TL en ja
-メッセージをここに
-```
-
-`#noTL` プレフィックスで特定のメッセージの翻訳をスキップ。
-
-
-## 言語コード
-- `en` - 英語
-- `ja` - 日本語
-- `ko` - 韓国語
-- `zh` - 中国語
-- `es` - スペイン語
-- `fr` - フランス語
-- `de` - ドイツ語
-- `it` - イタリア語
-- `pt` - ポルトガル語
-- `ru` - ロシア語
-"""
-
-    # Send English help
-    await ctx.send(help_text)
-    # Send Japanese help
-    await ctx.send(jp_help_text)
+    """Send help information in available languages"""
+    # Send help for each loaded locale
+    if locales:
+        for lang, data in locales.items():
+            if "help_text" in data:
+                await ctx.send(data["help_text"])
+    else:
+        # Fallback if locales didn't load
+        await ctx.send("Error: Help text not found. Please check locales folder.")
 
 # Helper function to get suitable models from the Gemini API
 def get_models():
@@ -1166,24 +1055,29 @@ async def ai_command_error(ctx, error):
 
 @bot.event
 async def on_message(message):
+    logger.info(f"Received message from {message.author}: {message.content[:50]}")
     # Process commands first
     await bot.process_commands(message)
 
     # Skip if message is from a bot
     if message.author.bot:
+        logger.info("Skipping message: Author is a bot")
         return
 
     # Only process messages in text channels
     if not isinstance(message.channel, discord.TextChannel):
+        logger.info("Skipping message: Not a text channel")
         return
 
     # Skip if message content is empty or only whitespace (e.g., image-only messages)
     content = message.content.strip()
     if not content:
+        logger.info("Skipping message: Empty content")
         return
 
     # Check for #noTL prefix to skip translation
     if content.startswith('#noTL'):
+        logger.info("Skipping message: Starts with #noTL")
         return
 
     # Check for manual translation request with #TL prefix
@@ -1274,24 +1168,33 @@ async def on_message(message):
 
     # Skip if message is a command
     if message.content.startswith('!'):
+        logger.info("Skipping message: Starts with '!' (command)")
         return
 
     # Check if channel has translation disabled
     channel_id = str(message.channel.id)
     if channel_id in channel_settings and not channel_settings[channel_id]:
+        logger.info(f"Skipping message: Channel {channel_id} has translation disabled")
         return
 
     # Check if user has language preference and translation is enabled
     user_id = str(message.author.id)
     user_name = message.author.display_name
     user_prefs = user_langs.get(user_id, {})
+    
+    logger.info(f"User {user_name} ({user_id}) prefs: {user_prefs}")
 
     if user_prefs and user_prefs.get("enabled", False):
         from_lang = user_prefs.get("from_lang")
         to_lang = user_prefs.get("to_lang")
 
         if from_lang and to_lang:
+            logger.info(f"Auto-translating message for {user_name} from {from_lang} to {to_lang}")
             await translate_and_send(message, from_lang, to_lang, message.content)
+        else:
+            logger.info(f"Skipping auto-translation: Missing from_lang or to_lang for user {user_name}")
+    else:
+        logger.info(f"Skipping auto-translation: User {user_name} has translation disabled or no prefs")
 
 # Helper function to translate text and send response
 async def translate_and_send(message, from_lang, to_lang, text, display_author=None, track_pair=True):
