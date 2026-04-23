@@ -47,7 +47,8 @@ if not logger.handlers:
 
     # File handler with date in filename
     date_str = datetime.now().strftime('%Y-%m-%d')
-    file_handler = logging.FileHandler(f'translation-bot-{date_str}.log', encoding='utf-8', mode='a')
+    os.makedirs('logs', exist_ok=True)
+    file_handler = logging.FileHandler(f'logs/translation-bot-{date_str}.log', encoding='utf-8', mode='a')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(log_format)
     logger.addHandler(file_handler)
