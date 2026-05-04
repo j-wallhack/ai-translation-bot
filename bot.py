@@ -60,8 +60,9 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# New config file for bot settings
+# Per-guild bot config file
 CONFIG_FILE = 'settings/bot_config.json'
+DEFAULT_MODEL = 'gemini-2.0-flash'
 
 def load_bot_config():
     """Load bot configuration from JSON file."""
@@ -69,31 +70,39 @@ def load_bot_config():
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
-                if 'model_name' not in config:
-                    # A reasonable default based on what was hardcoded before
-                    config['model_name'] = 'gemini-2.0-flash'
-                if 'model_status_channel_id' not in config:
-                    config['model_status_channel_id'] = 1417437633956544582
+                # Migrate old flat format to per-guild
+                if 'model_name' in config:
+                    logger.info("Migrating flat bot_config to per-guild format")
+                    return {"default": config}
                 return config
-        else:
-            return {'model_name': 'gemini-2.0-flash'}
+        return {}
     except Exception as e:
         logger.error(f"Error loading bot config: {e}")
-        return {'model_name': 'gemini-2.0-flash'}
+        return {}
 
-def save_bot_config(config):
+def save_bot_config():
     """Save bot configuration to JSON file."""
     try:
         with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=4)
+            json.dump(bot_config, f, indent=4)
     except Exception as e:
         logger.error(f"Error saving bot config: {e}")
+
+def get_guild_config(guild_id):
+    gid = str(guild_id)
+    if gid not in bot_config:
+        default = bot_config.get("default", {})
+        bot_config[gid] = {
+            'model_name': default.get('model_name', DEFAULT_MODEL),
+            'model_status_channel_id': default.get('model_status_channel_id')
+        }
+    return bot_config[gid]
 
 bot_config = load_bot_config()
 
 # Configure Gemini API client
 client = genai.Client(api_key=GEMINI_API_KEY)
-logger.info(f"Initialized with model: {bot_config['model_name']}")
+logger.info(f"Initialized Gemini client with default model: {DEFAULT_MODEL}")
 
 # --- Helpers for AI content generation (text and images) ---
 async def generate_ai_content(model_id: str, prompt: str):
@@ -189,77 +198,55 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Language preferences file
+# Per-guild settings files
 LANG_FILE = 'settings/user_langs.json'
 CHANNEL_FILE = 'settings/channel_settings.json'
 MESSAGE_PAIRS_FILE = 'settings/message_pairs.json'
 
-# Load user language preferences
-def load_user_langs():
+def _load_json(path):
     try:
-        if os.path.exists(LANG_FILE):
-            with open(LANG_FILE, 'r') as f:
+        if os.path.exists(path):
+            with open(path, 'r') as f:
                 return json.load(f)
-        else:
-            return {}
+        return {}
     except Exception as e:
-        logger.error(f"Error loading language preferences: {e}")
+        logger.error(f"Error loading {path}: {e}")
         return {}
 
-# Load channel settings
-def load_channel_settings():
+def _save_json(path, data):
     try:
-        if os.path.exists(CHANNEL_FILE):
-            with open(CHANNEL_FILE, 'r') as f:
-                return json.load(f)
-        else:
-            return {}
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=4)
     except Exception as e:
-        logger.error(f"Error loading channel settings: {e}")
-        return {}
+        logger.error(f"Error saving {path}: {e}")
 
-# Load message pairs (original_msg_id -> translated_msg_id)
-def load_message_pairs():
-    try:
-        if os.path.exists(MESSAGE_PAIRS_FILE):
-            with open(MESSAGE_PAIRS_FILE, 'r') as f:
-                return json.load(f)
-        else:
-            return {}
-    except Exception as e:
-        logger.error(f"Error loading message pairs: {e}")
-        return {}
+# guild_id -> {user_id -> {from_lang, to_lang, enabled}}
+user_langs = _load_json(LANG_FILE)
+# guild_id -> {channel_id -> enabled}
+channel_settings = _load_json(CHANNEL_FILE)
+# message_pairs stay flat (message IDs are globally unique)
+message_pairs = _load_json(MESSAGE_PAIRS_FILE)
 
-# Save user language preferences
-def save_user_langs(user_langs):
-    try:
-        with open(LANG_FILE, 'w') as f:
-            json.dump(user_langs, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving language preferences: {e}")
+def save_user_langs():
+    _save_json(LANG_FILE, user_langs)
 
-# Save channel settings
-def save_channel_settings(channel_settings):
-    try:
-        with open(CHANNEL_FILE, 'w') as f:
-            json.dump(channel_settings, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving channel settings: {e}")
+def save_channel_settings():
+    _save_json(CHANNEL_FILE, channel_settings)
 
-# Save message pairs
-def save_message_pairs(message_pairs):
-    try:
-        with open(MESSAGE_PAIRS_FILE, 'w') as f:
-            json.dump(message_pairs, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving message pairs: {e}")
+def save_message_pairs():
+    _save_json(MESSAGE_PAIRS_FILE, message_pairs)
 
-# User language preferences
-user_langs = load_user_langs()
-# Channel translation settings (channel_id -> enabled status)
-channel_settings = load_channel_settings()
-# Message pairs for tracking edits/deletes (original_msg_id -> translated_msg_id)
-message_pairs = load_message_pairs()
+def get_guild_user_langs(guild_id):
+    gid = str(guild_id)
+    if gid not in user_langs:
+        user_langs[gid] = {}
+    return user_langs[gid]
+
+def get_guild_channel_settings(guild_id):
+    gid = str(guild_id)
+    if gid not in channel_settings:
+        channel_settings[gid] = {}
+    return channel_settings[gid]
 
 # A dictionary of supported languages for the UI select menu
 LANGUAGES = {
@@ -288,10 +275,11 @@ class LanguageSelect(ui.Select):
         super().__init__(placeholder=placeholder, custom_id=custom_id, options=options)
 
 class SetLangView(ui.View):
-    def __init__(self, member, author):
+    def __init__(self, member, author, guild_id):
         super().__init__(timeout=180)
         self.member = member
         self.author = author
+        self.guild_id = guild_id
         self.from_lang = None
         self.to_lang = None
 
@@ -328,18 +316,19 @@ class SetLangView(ui.View):
             await interaction.response.send_message("Please select both a source and target language.", ephemeral=True)
             return
 
+        guild_langs = get_guild_user_langs(self.guild_id)
         user_id = str(self.member.id)
-        if user_id not in user_langs:
-            user_langs[user_id] = {
+        if user_id not in guild_langs:
+            guild_langs[user_id] = {
                 "from_lang": self.from_lang,
                 "to_lang": self.to_lang,
                 "enabled": True
             }
         else:
-            user_langs[user_id]["from_lang"] = self.from_lang
-            user_langs[user_id]["to_lang"] = self.to_lang
+            guild_langs[user_id]["from_lang"] = self.from_lang
+            guild_langs[user_id]["to_lang"] = self.to_lang
         
-        save_user_langs(user_langs)
+        save_user_langs()
         
         embed = discord.Embed(
             description=f"Language preference for **{self.member.display_name}** set to translate from `{self.from_lang}` to `{self.to_lang}`.",
@@ -472,9 +461,10 @@ class AIView(ui.View):
         return True
 
 class MyLangView(ui.View):
-    def __init__(self, author_id):
+    def __init__(self, author_id, guild_id):
         super().__init__(timeout=180)
         self.author_id = author_id
+        self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -483,11 +473,12 @@ class MyLangView(ui.View):
         return True
 
     async def _update_embed(self, interaction: discord.Interaction, enabled: bool):
+        guild_langs = get_guild_user_langs(self.guild_id)
         user_id = str(self.author_id)
-        user_langs[user_id]["enabled"] = enabled
-        save_user_langs(user_langs)
+        guild_langs[user_id]["enabled"] = enabled
+        save_user_langs()
         
-        user_prefs = user_langs.get(user_id, {})
+        user_prefs = guild_langs.get(user_id, {})
         from_lang = user_prefs.get("from_lang", "Not set")
         to_lang = user_prefs.get("to_lang", "Not set")
         status = "✅ Enabled" if enabled else "❌ Disabled"
@@ -512,9 +503,10 @@ class MyLangView(ui.View):
         await self._update_embed(interaction, False)
 
 class TranslateSelfView(ui.View):
-    def __init__(self, author_id):
+    def __init__(self, author_id, guild_id):
         super().__init__(timeout=180)
         self.author_id = author_id
+        self.guild_id = guild_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -524,10 +516,11 @@ class TranslateSelfView(ui.View):
 
     @ui.button(label="Turn On", style=discord.ButtonStyle.green)
     async def turn_on(self, interaction: discord.Interaction, button: ui.Button):
+        guild_langs = get_guild_user_langs(self.guild_id)
         user_id = str(self.author_id)
-        if user_id in user_langs:
-            user_langs[user_id]["enabled"] = True
-            save_user_langs(user_langs)
+        if user_id in guild_langs:
+            guild_langs[user_id]["enabled"] = True
+            save_user_langs()
             embed = discord.Embed(description="✅ Translation turned **on** for yourself.", color=discord.Color.green())
             await interaction.response.edit_message(embed=embed, view=None)
         else:
@@ -536,45 +529,71 @@ class TranslateSelfView(ui.View):
 
     @ui.button(label="Turn Off", style=discord.ButtonStyle.red)
     async def turn_off(self, interaction: discord.Interaction, button: ui.Button):
+        guild_langs = get_guild_user_langs(self.guild_id)
         user_id = str(self.author_id)
-        if user_id in user_langs:
-            user_langs[user_id]["enabled"] = False
-            save_user_langs(user_langs)
+        if user_id in guild_langs:
+            guild_langs[user_id]["enabled"] = False
+            save_user_langs()
             embed = discord.Embed(description="❌ Translation turned **off** for yourself.", color=discord.Color.orange())
             await interaction.response.edit_message(embed=embed, view=None)
         else:
             embed = discord.Embed(description="You need to set a language preference first. Use `!setlang` (admin).", color=discord.Color.red())
             await interaction.response.edit_message(embed=embed, view=None)
 
-async def update_model_status_channel():
+async def update_model_status_channel(guild_id=None):
     """Updates the name of the configured voice channel to reflect the current model."""
-    channel_id = bot_config.get('model_status_channel_id')
-    if channel_id:
-        try:
-            channel = bot.get_channel(int(channel_id))
-            if channel and isinstance(channel, discord.VoiceChannel):
-                model_name = bot_config.get('model_name', 'N/A')
-                prefix = "🤖 "
-                # Truncate model name if the total channel name would exceed 100 chars
-                if len(prefix) + len(model_name) > 100:
-                    max_len = 100 - len(prefix) - 3  # Account for "..."
-                    model_name = model_name[:max_len] + "..."
-                new_name = f"{prefix}{model_name}"
+    guild_ids = [str(guild_id)] if guild_id else [gid for gid in bot_config if gid != "default"]
+    for gid in guild_ids:
+        config = get_guild_config(gid)
+        channel_id = config.get('model_status_channel_id')
+        if channel_id:
+            try:
+                channel = bot.get_channel(int(channel_id))
+                if channel and isinstance(channel, discord.VoiceChannel):
+                    model_name = config.get('model_name', 'N/A')
+                    prefix = "🤖 "
+                    if len(prefix) + len(model_name) > 100:
+                        max_len = 100 - len(prefix) - 3
+                        model_name = model_name[:max_len] + "..."
+                    new_name = f"{prefix}{model_name}"
 
-                await channel.edit(name=new_name)
-                logger.info(f"Updated status channel '{channel.name}' to '{new_name}'")
-            elif channel:
-                logger.warning(f"Channel {channel_id} is not a voice channel.")
-            else:
-                logger.warning(f"Status channel with ID {channel_id} not found.")
-        except discord.Forbidden:
-            logger.error(f"Bot lacks permissions to edit channel {channel_id}.")
-        except Exception as e:
-            logger.error(f"Failed to update status channel {channel_id}: {e}")
+                    await channel.edit(name=new_name)
+                    logger.info(f"Updated status channel '{channel.name}' to '{new_name}' for guild {gid}")
+                elif channel:
+                    logger.warning(f"Channel {channel_id} is not a voice channel.")
+                else:
+                    logger.warning(f"Status channel with ID {channel_id} not found.")
+            except discord.Forbidden:
+                logger.error(f"Bot lacks permissions to edit channel {channel_id}.")
+            except Exception as e:
+                logger.error(f"Failed to update status channel {channel_id}: {e}")
 
 @bot.event
 async def on_ready():
     logger.info(f"{bot.user.name} has connected to Discord!")
+
+    # Auto-migrate flat settings to per-guild format using first available guild
+    if bot.guilds:
+        default_gid = str(bot.guilds[0].id)
+
+        # Migrate user_langs if flat
+        first_val = next(iter(user_langs.values()), None) if user_langs else None
+        if isinstance(first_val, dict) and "from_lang" in first_val:
+            logger.info(f"Migrating flat user_langs to per-guild under guild {default_gid}")
+            old_data = dict(user_langs)
+            user_langs.clear()
+            user_langs[default_gid] = old_data
+            save_user_langs()
+
+        # Migrate channel_settings if flat
+        first_val = next(iter(channel_settings.values()), None) if channel_settings else None
+        if isinstance(first_val, bool):
+            logger.info(f"Migrating flat channel_settings to per-guild under guild {default_gid}")
+            old_data = dict(channel_settings)
+            channel_settings.clear()
+            channel_settings[default_gid] = old_data
+            save_channel_settings()
+
     await update_model_status_channel()
 
     # Send startup message
@@ -594,28 +613,29 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 async def set_language(ctx, member: discord.Member, from_lang: str = None, to_lang: str = None):
     """Set the language translation preferences for a user (Admin/Mod only)"""
+    guild_id = str(ctx.guild.id)
+    guild_langs = get_guild_user_langs(guild_id)
     
-    # Existing logic for command-line usage
     if from_lang and to_lang:
         try:
             user_id = str(member.id)
-            if user_id not in user_langs:
-                user_langs[user_id] = {
+            if user_id not in guild_langs:
+                guild_langs[user_id] = {
                     "from_lang": from_lang,
                     "to_lang": to_lang,
                     "enabled": True
                 }
             else:
-                user_langs[user_id]["from_lang"] = from_lang
-                user_langs[user_id]["to_lang"] = to_lang
+                guild_langs[user_id]["from_lang"] = from_lang
+                guild_langs[user_id]["to_lang"] = to_lang
 
-            save_user_langs(user_langs)
+            save_user_langs()
             embed = discord.Embed(
                 description=f"Language preference for **{member.display_name}** set to translate from `{from_lang}` to `{to_lang}`.",
                 color=discord.Color.green()
             )
             await ctx.send(embed=embed)
-            logger.info(f"Set language for user {user_id} from {from_lang} to {to_lang}")
+            logger.info(f"Set language for user {user_id} from {from_lang} to {to_lang} in guild {guild_id}")
         except Exception as e:
             embed = discord.Embed(
                 title="Error",
@@ -626,14 +646,13 @@ async def set_language(ctx, member: discord.Member, from_lang: str = None, to_la
             logger.error(f"Error setting language: {e}")
             return
 
-    # New UI-based logic
     embed = discord.Embed(
         title=f"Set Language for {member.display_name}",
         description="Select the source and target languages below.",
         color=discord.Color.blue()
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed, view=SetLangView(member, ctx.author))
+    await ctx.send(embed=embed, view=SetLangView(member, ctx.author, guild_id))
 
 @set_language.error
 async def set_language_error(ctx, error):
@@ -650,9 +669,11 @@ async def set_language_error(ctx, error):
 
 @bot.command(name='mylang')
 async def my_language(ctx):
-    """Check your current language preference"""
+    """Check your current language preference for this server"""
+    guild_id = str(ctx.guild.id)
+    guild_langs = get_guild_user_langs(guild_id)
     user_id = str(ctx.author.id)
-    user_prefs = user_langs.get(user_id, {})
+    user_prefs = guild_langs.get(user_id, {})
 
     if user_prefs:
         from_lang = user_prefs.get("from_lang", "Not set")
@@ -668,10 +689,10 @@ async def my_language(ctx):
         embed.add_field(name="Source Language", value=f"`{from_lang}`", inline=True)
         embed.add_field(name="Target Language", value=f"`{to_lang}`", inline=True)
         embed.add_field(name="Status", value=status, inline=False)
-        await ctx.send(embed=embed, view=MyLangView(ctx.author.id))
+        await ctx.send(embed=embed, view=MyLangView(ctx.author.id, guild_id))
     else:
         embed = discord.Embed(
-            description="You don't have a language preference set. Use `!setlang` (admin) to get started.",
+            description="You don't have a language preference set for this server. Use `!setlang` (admin) to get started.",
             color=discord.Color.orange()
         )
         await ctx.send(embed=embed)
@@ -679,11 +700,14 @@ async def my_language(ctx):
 @bot.command(name='translate', aliases=['tl'])
 async def translate_command(ctx, state: str = None, target: str = None):
     """Turn translation on or off for a user, channel, or all users"""
+    guild_id = str(ctx.guild.id)
+    guild_langs = get_guild_user_langs(guild_id)
+    guild_ch_settings = get_guild_channel_settings(guild_id)
 
     # UI for self-toggle
     if state is None and target is None:
         user_id = str(ctx.author.id)
-        if user_id not in user_langs:
+        if user_id not in guild_langs:
             embed = discord.Embed(
                 description="You don't have a language preference set. Use `!setlang` (admin) to get started.",
                 color=discord.Color.orange()
@@ -691,7 +715,7 @@ async def translate_command(ctx, state: str = None, target: str = None):
             await ctx.send(embed=embed)
             return
         
-        current_status = user_langs[user_id].get("enabled", False)
+        current_status = guild_langs[user_id].get("enabled", False)
         status_text = "enabled" if current_status else "disabled"
         
         embed = discord.Embed(
@@ -699,7 +723,7 @@ async def translate_command(ctx, state: str = None, target: str = None):
             description=f"Your translation is currently **{status_text}**.",
             color=discord.Color.blue()
         )
-        await ctx.send(embed=embed, view=TranslateSelfView(ctx.author.id))
+        await ctx.send(embed=embed, view=TranslateSelfView(ctx.author.id, guild_id))
         return
 
     # Special case for help command
@@ -707,7 +731,6 @@ async def translate_command(ctx, state: str = None, target: str = None):
         await send_help_embed(ctx)
         return
 
-    # Existing command logic
     state = state.lower() if state else ''
     if state not in ["on", "off"]:
         embed = discord.Embed(description="Invalid state. Use `on` or `off` or `help`.", color=discord.Color.red())
@@ -722,10 +745,10 @@ async def translate_command(ctx, state: str = None, target: str = None):
     # Self toggle (no target specified)
     if target is None:
         user_id = str(ctx.author.id)
-        if user_id in user_langs:
-            user_langs[user_id]["enabled"] = enabled
+        if user_id in guild_langs:
+            guild_langs[user_id]["enabled"] = enabled
             embed.description = f"Translation turned **{status_text}** for yourself."
-            logger.info(f"Translation {status_text} for user {ctx.author.display_name}")
+            logger.info(f"Translation {status_text} for user {ctx.author.display_name} in guild {guild_id}")
         else:
             embed.description = "You need to set a language preference first with `!setlang`."
             embed.color = discord.Color.red()
@@ -735,19 +758,17 @@ async def translate_command(ctx, state: str = None, target: str = None):
     # Admin/Mod operations (target is specified)
     elif ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_messages:
         if target.upper() == "ALL":
-            # Toggle for all users
-            for user_id in user_langs:
-                user_langs[user_id]["enabled"] = enabled
+            for user_id in guild_langs:
+                guild_langs[user_id]["enabled"] = enabled
             embed.description = f"Translation turned **{status_text}** for all users."
-            logger.info(f"Translation {status_text} for ALL users by {ctx.author.display_name}")
+            logger.info(f"Translation {status_text} for ALL users by {ctx.author.display_name} in guild {guild_id}")
 
         # Channel mention
         elif target.startswith('<#') and target.endswith('>'):
             channel_id = str(target[2:-1])
-            channel_settings[channel_id] = enabled
-            save_channel_settings(channel_settings)
+            guild_ch_settings[channel_id] = enabled
+            save_channel_settings()
 
-            # Get channel name for the message
             try:
                 channel = await bot.fetch_channel(int(channel_id))
                 channel_name = channel.name if channel else channel_id
@@ -760,10 +781,9 @@ async def translate_command(ctx, state: str = None, target: str = None):
         # User mention
         elif target.startswith('<@') and target.endswith('>'):
             try:
-                # Extract user ID from mention
                 target_id = str(target[2:-1].replace('!', ''))
-                if target_id in user_langs:
-                    user_langs[target_id]["enabled"] = enabled
+                if target_id in guild_langs:
+                    guild_langs[target_id]["enabled"] = enabled
                     user = await bot.fetch_user(int(target_id))
                     user_name = user.display_name if user else target_id
                     embed.description = f"Translation turned **{status_text}** for **{user_name}**."
@@ -791,7 +811,7 @@ async def translate_command(ctx, state: str = None, target: str = None):
         await ctx.send(embed=embed)
         return
 
-    save_user_langs(user_langs)
+    save_user_langs()
     await ctx.send(embed=embed)
 
 @bot.command(name='bothelp', aliases=['bh'])
@@ -850,7 +870,8 @@ def get_models():
 
 class ModelSelect(ui.Select):
     """A select menu for choosing a Gemini model."""
-    def __init__(self, models):
+    def __init__(self, models, guild_id):
+        self.guild_id = guild_id
         options = [
             discord.SelectOption(
                 label=model['display_name'],
@@ -868,7 +889,6 @@ class ModelSelect(ui.Select):
         super().__init__(placeholder="Choose a translation model...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        global bot_config
         selected_model_id = self.values[0]
 
         if selected_model_id == "no_models":
@@ -876,16 +896,15 @@ class ModelSelect(ui.Select):
             return
 
         try:
-            bot_config['model_name'] = selected_model_id
-            save_bot_config(bot_config)
+            config = get_guild_config(self.guild_id)
+            config['model_name'] = selected_model_id
+            save_bot_config()
 
-            # Acknowledge the change with an ephemeral message, keeping the view intact
             await interaction.response.send_message(content=f"✅ Translation model updated to `{selected_model_id}`.", ephemeral=True)
 
-            logger.info(f"Model updated to {selected_model_id} by {interaction.user.display_name}")
+            logger.info(f"Model updated to {selected_model_id} by {interaction.user.display_name} in guild {self.guild_id}")
 
-            # Update the voice channel status
-            await update_model_status_channel()
+            await update_model_status_channel(self.guild_id)
 
         except Exception as e:
             logger.error(f"Failed to update model to {selected_model_id}: {e}")
@@ -893,9 +912,9 @@ class ModelSelect(ui.Select):
 
 class ConfigView(ui.View):
     """A view that contains the model selection dropdown."""
-    def __init__(self, models):
-        super().__init__(timeout=180) # View times out after 3 minutes
-        self.add_item(ModelSelect(models))
+    def __init__(self, models, guild_id):
+        super().__init__(timeout=180)
+        self.add_item(ModelSelect(models, guild_id))
 
 # --- Bot Configuration Command ---
 
@@ -905,7 +924,8 @@ async def config(ctx):
     """Configure the translation bot (Admin only)."""
     await ctx.message.delete()
     models = get_models()
-    view = ConfigView(models)
+    guild_id = str(ctx.guild.id)
+    view = ConfigView(models, guild_id)
     await ctx.send("Please select the Gemini model to use for translations:", view=view)
 
 @config.error
@@ -919,28 +939,25 @@ async def config_error(ctx, error):
 @bot.command(name='setstatuschannel')
 @commands.has_permissions(administrator=True)
 async def set_status_channel(ctx, channel: discord.VoiceChannel = None):
-    """Sets or clears the voice channel for displaying the current model.
-
-    Args:
-        channel: The voice channel to use (mention or ID), or none to clear.
-    """
+    """Sets or clears the voice channel for displaying the current model."""
+    guild_id = str(ctx.guild.id)
+    config = get_guild_config(guild_id)
     if channel:
-        bot_config['model_status_channel_id'] = str(channel.id)
-        save_bot_config(bot_config)
+        config['model_status_channel_id'] = str(channel.id)
+        save_bot_config()
         await ctx.send(f"✅ Status channel set to `{channel.name}`.")
-        logger.info(f"Status channel set to {channel.id} by {ctx.author.display_name}")
-        await update_model_status_channel()  # Update immediately
+        logger.info(f"Status channel set to {channel.id} by {ctx.author.display_name} in guild {guild_id}")
+        await update_model_status_channel(guild_id)
     else:
-        if 'model_status_channel_id' in bot_config:
-            old_channel_id = bot_config.pop('model_status_channel_id')
-            save_bot_config(bot_config)
+        if config.get('model_status_channel_id'):
+            old_channel_id = config.pop('model_status_channel_id')
+            save_bot_config()
             await ctx.send("✅ Status channel configuration has been cleared.")
-            logger.info(f"Status channel cleared by {ctx.author.display_name}")
-            # Try to reset channel name to something generic
+            logger.info(f"Status channel cleared by {ctx.author.display_name} in guild {guild_id}")
             try:
                 old_channel = bot.get_channel(int(old_channel_id))
                 if old_channel and isinstance(old_channel, discord.VoiceChannel):
-                    await old_channel.edit(name="model-status")  # Reset name
+                    await old_channel.edit(name="model-status")
             except Exception as e:
                 logger.warning(f"Could not reset name for old status channel {old_channel_id}: {e}")
         else:
@@ -961,28 +978,32 @@ async def set_status_channel_error(ctx, error):
 @bot.command(name='status')
 @commands.has_permissions(administrator=True)
 async def status(ctx):
-    """Displays an overview of the bot's translation settings."""
+    """Displays an overview of the bot's translation settings for this server."""
     await ctx.defer()
+
+    guild_id = str(ctx.guild.id)
+    guild_langs = get_guild_user_langs(guild_id)
+    guild_ch_settings = get_guild_channel_settings(guild_id)
+    config = get_guild_config(guild_id)
 
     embed = discord.Embed(
         title="Translation Bot Status",
         description="Current configuration for members and channels.",
         color=discord.Color.blue()
     )
-    embed.set_footer(text=f"Model: {bot_config.get('model_name', 'N/A')}")
+    embed.set_footer(text=f"Model: {config.get('model_name', 'N/A')}")
 
     # Member Status
     member_statuses = []
-    if user_langs:
-        for user_id, settings in user_langs.items():
+    if guild_langs:
+        for user_id, settings in guild_langs.items():
             member = ctx.guild.get_member(int(user_id))
             name = member.display_name if member else f"User ID: {user_id}"
             from_lang = settings.get('from_lang', 'N/A')
             to_lang = settings.get('to_lang', 'N/A')
-            status = "✅" if settings.get('enabled', False) else "❌"
-            member_statuses.append(f"**{name}**: `{from_lang}` → `{to_lang}` {status}")
+            status_icon = "✅" if settings.get('enabled', False) else "❌"
+            member_statuses.append(f"**{name}**: `{from_lang}` → `{to_lang}` {status_icon}")
         
-        # Split into multiple fields if too long
         member_text = "\n".join(member_statuses)
         if len(member_text) > 1024:
             for i in range(0, len(member_text), 1024):
@@ -995,19 +1016,18 @@ async def status(ctx):
 
     # Channel Status (sorted by category)
     channel_statuses_by_cat = {}
-    if channel_settings:
-        for channel_id, enabled in channel_settings.items():
+    if guild_ch_settings:
+        for channel_id, enabled in guild_ch_settings.items():
             channel = ctx.guild.get_channel(int(channel_id))
             if channel:
                 category = channel.category.name if channel.category else "No Category"
                 if category not in channel_statuses_by_cat:
                     channel_statuses_by_cat[category] = []
                 
-                status = "✅" if enabled else "❌"
-                channel_statuses_by_cat[category].append(f"{channel.mention} {status}")
+                status_icon = "✅" if enabled else "❌"
+                channel_statuses_by_cat[category].append(f"{channel.mention} {status_icon}")
 
     if channel_statuses_by_cat:
-        # Sort categories alphabetically
         sorted_categories = sorted(channel_statuses_by_cat.keys())
         for category in sorted_categories:
             channels = channel_statuses_by_cat[category]
@@ -1145,8 +1165,10 @@ async def on_message(message):
             await message.reply("That message doesn't contain any text to translate.")
             return
 
+        guild_id = str(message.guild.id)
+        guild_langs = get_guild_user_langs(guild_id)
         user_id = str(message.author.id)
-        user_prefs = user_langs.get(user_id, {})
+        user_prefs = guild_langs.get(user_id, {})
         from_lang = user_prefs.get("from_lang")
         to_lang = user_prefs.get("to_lang")
         if not (from_lang and to_lang):
@@ -1172,18 +1194,23 @@ async def on_message(message):
         logger.info("Skipping message: Starts with '!' (command)")
         return
 
+    # Check guild-scoped settings
+    guild_id = str(message.guild.id)
+    guild_langs = get_guild_user_langs(guild_id)
+    guild_ch_settings = get_guild_channel_settings(guild_id)
+
     # Check if channel has translation disabled
     channel_id = str(message.channel.id)
-    if channel_id in channel_settings and not channel_settings[channel_id]:
+    if channel_id in guild_ch_settings and not guild_ch_settings[channel_id]:
         logger.info(f"Skipping message: Channel {channel_id} has translation disabled")
         return
 
     # Check if user has language preference and translation is enabled
     user_id = str(message.author.id)
     user_name = message.author.display_name
-    user_prefs = user_langs.get(user_id, {})
+    user_prefs = guild_langs.get(user_id, {})
     
-    logger.info(f"User {user_name} ({user_id}) prefs: {user_prefs}")
+    logger.info(f"User {user_name} ({user_id}) prefs in guild {guild_id}: {user_prefs}")
 
     if user_prefs and user_prefs.get("enabled", False):
         from_lang = user_prefs.get("from_lang")
@@ -1236,6 +1263,8 @@ async def translate_and_send(message, from_lang, to_lang, text, display_author=N
             thinking_message = await message.channel.send(embed=thinking_embed)
 
         # Call Gemini API for translation with typing indicator
+        guild_config = get_guild_config(message.guild.id)
+        model_name = guild_config.get('model_name', DEFAULT_MODEL)
         async with message.channel.typing():
             prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
@@ -1253,30 +1282,24 @@ Requirements:
 Message to translate:
 {text}"""
             response = await client.aio.models.generate_content(
-                model=bot_config['model_name'], contents=prompt
+                model=model_name, contents=prompt
             )
 
         # Get translated message
         translated_text = response.text.strip() if response.text else ""
         if translated_text:
-            # Ensure the translated text fits in Discord embed (max 4096 characters for description)
             if len(translated_text) > 4096:
                 translated_text = translated_text[:4093] + "..."
 
-            # Create an embed for the translation
             embed = discord.Embed(
                 description=translated_text,
                 color=discord.Color.blue()
             )
 
-            # Set the author with user's name and avatar
             embed.set_author(
                 name=author_for_display.display_name,
                 icon_url=author_for_display.display_avatar.url
             )
-
-            # Add language information to the footer
-            #embed.set_footer(text=f"*Translated using {bot_config['model_name']}")
 
             # Edit the thinking message with the final translation
             if thinking_message:
@@ -1284,13 +1307,13 @@ Message to translate:
                 # Store the message pair for tracking edits/deletes
                 if track_pair:
                     message_pairs[str(message.id)] = str(thinking_message.id)
-                    save_message_pairs(message_pairs)
+                    save_message_pairs()
             else:
                 # This is a fallback in case the thinking message failed to send
                 sent_message = await message.channel.send(embed=embed)
                 if track_pair:
                     message_pairs[str(message.id)] = str(sent_message.id)
-                    save_message_pairs(message_pairs)
+                    save_message_pairs()
 
             logger.info(f"Translated message for user {message.author.display_name} from {from_lang} to {to_lang}")
             #also log the original message and the translated message
@@ -1310,17 +1333,16 @@ Message to translate:
             err_text = ""
         if "429" in err_text and "You exceeded your current quota" in err_text:
             try:
-                # Build candidate list of text-capable models excluding image/live variants
+                guild_config = get_guild_config(message.guild.id)
                 candidates = [m['id'] for m in get_models() if 'image' not in m['id'] and 'live' not in m['id']]
-                current_model_id = bot_config.get('model_name')
-                # Remove current model from candidates while preserving order
+                current_model_id = guild_config.get('model_name')
                 candidates = [mid for mid in candidates if mid != current_model_id]
                 last_err = None
                 for next_model_id in candidates:
                     try:
-                        bot_config['model_name'] = next_model_id
-                        save_bot_config(bot_config)
-                        await update_model_status_channel()
+                        guild_config['model_name'] = next_model_id
+                        save_bot_config()
+                        await update_model_status_channel(message.guild.id)
                         if 'prompt' not in locals():
                             prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
@@ -1355,11 +1377,11 @@ Message to translate:
                             if thinking_message:
                                 await thinking_message.edit(content=None, embed=embed)
                                 message_pairs[str(message.id)] = str(thinking_message.id)
-                                save_message_pairs(message_pairs)
+                                save_message_pairs()
                             else:
                                 sent_message = await message.channel.send(embed=embed)
                                 message_pairs[str(message.id)] = str(sent_message.id)
-                                save_message_pairs(message_pairs)
+                                save_message_pairs()
                             logger.info(f"Quota error fallback succeeded by switching to model {next_model_id}")
                             return
                         else:
@@ -1402,10 +1424,11 @@ async def on_message_edit(before, after):
 
                 # Check if message content actually changed
                 if before.content != after.content:
-                    # Get user's translation settings if this is an automatic translation
+                    guild_id = str(after.guild.id)
+                    guild_langs = get_guild_user_langs(guild_id)
                     user_id = str(after.author.id)
                     user_name = after.author.display_name
-                    user_prefs = user_langs.get(user_id, {})
+                    user_prefs = guild_langs.get(user_id, {})
 
                     # Check if content starts with #TL for manual translation
                     content = after.content.strip()
@@ -1442,7 +1465,7 @@ async def on_message_edit(before, after):
                 logger.warning(f"Translated message not found for update: {translated_msg_id}")
                 # Remove the entry from our tracking
                 del message_pairs[str(after.id)]
-                save_message_pairs(message_pairs)
+                save_message_pairs()
 
         except Exception as e:
             logger.error(f"Error handling message edit: {e}")
@@ -1467,7 +1490,7 @@ async def on_message_delete(message):
             finally:
                 # Remove the entry from our tracking
                 del message_pairs[str(message.id)]
-                save_message_pairs(message_pairs)
+                save_message_pairs()
 
         except Exception as e:
             logger.error(f"Error handling message delete: {e}")
@@ -1500,6 +1523,8 @@ async def update_translation(message, translated_msg, from_lang, to_lang, text):
         await translated_msg.edit(content=None, embed=thinking_embed)
 
         # Call Gemini API for translation with typing indicator
+        guild_config = get_guild_config(message.guild.id)
+        model_name = guild_config.get('model_name', DEFAULT_MODEL)
         async with message.channel.typing():
             prompt = f"""Translate the following text from {from_lang} to {to_lang}.
 Context: This is a Discord message, so preserve all markdown formatting, emojis, and user mentions.
@@ -1517,7 +1542,7 @@ Requirements:
 Message to translate:
 {text}"""
             response = await client.aio.models.generate_content(
-                model=bot_config['model_name'], contents=prompt
+                model=model_name, contents=prompt
             )
 
         # Get translated message
@@ -1565,17 +1590,18 @@ if __name__ == "__main__":
         logger.error("Missing environment variables. Please check your .env file")
         exit(1)
 
-    # Migrate old format to new format if needed
-    for user_id, value in list(user_langs.items()):
-        if isinstance(value, str):
-            user_langs[user_id] = {"from_lang": "auto", "to_lang": value, "enabled": True}
-        elif isinstance(value, dict) and "lang" in value:
-            # Migrate from single lang to from_lang/to_lang
-            user_langs[user_id] = {
-                "from_lang": "auto",
-                "to_lang": value["lang"],
-                "enabled": value.get("enabled", True)
-            }
-    save_user_langs(user_langs)
+    # Migrate old flat user_langs format to per-guild if needed
+    for guild_id, guild_data in list(user_langs.items()):
+        if isinstance(guild_data, dict):
+            for user_id, value in list(guild_data.items()):
+                if isinstance(value, str):
+                    guild_data[user_id] = {"from_lang": "auto", "to_lang": value, "enabled": True}
+                elif isinstance(value, dict) and "lang" in value:
+                    guild_data[user_id] = {
+                        "from_lang": "auto",
+                        "to_lang": value["lang"],
+                        "enabled": value.get("enabled", True)
+                    }
+    save_user_langs()
 
     bot.run(DISCORD_TOKEN) 
